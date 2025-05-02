@@ -225,26 +225,14 @@ export const release = async (
   const discussion_category_name = config.input_discussion_category_name;
   const generate_release_notes = config.input_generate_release_notes;
   try {
-    // you can't get a an existing draft by tag
-    // so we must find one in the list of all releases
-    let _release: Release | undefined = undefined;
-    if (config.input_draft) {
-      for await (const response of releaser.allReleases({
-        owner,
-        repo,
-      })) {
-        _release = response.data.find((release) => release.tag_name === tag);
-      }
-    } else {
-      _release = (
-        await releaser.getReleaseByTag({
-          owner,
-          repo,
-          tag,
-        })
-      ).data;
-    }
-    if (_release === null || _release === undefined) {
+    const _release: Release | undefined = await findTagFromReleases(
+      releaser,
+      owner,
+      repo,
+      tag,
+    );
+
+    if (_release === undefined) {
       return await createRelease(
         tag,
         config,
@@ -337,6 +325,33 @@ export const release = async (
     );
   }
 };
+
+/**
+ * Finds a release by tag name from all a repository's releases.
+ *
+ * @param releaser - The GitHub API wrapper for release operations
+ * @param owner - The owner of the repository
+ * @param repo - The name of the repository
+ * @param tag - The tag name to search for
+ * @returns The release with the given tag name, or undefined if no release with that tag name is found
+ */
+export async function findTagFromReleases(
+  releaser: Releaser,
+  owner: string,
+  repo: string,
+  tag: string,
+): Promise<Release | undefined> {
+  for await (const { data: releases } of releaser.allReleases({
+    owner,
+    repo,
+  })) {
+    const release = releases.find((release) => release.tag_name === tag);
+    if (release) {
+      return release;
+    }
+  }
+  return undefined;
+}
 
 async function createRelease(
   tag: string,
