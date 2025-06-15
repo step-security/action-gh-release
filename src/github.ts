@@ -2,7 +2,7 @@ import { GitHub } from "@actions/github/lib/utils";
 import { Config, isTag, releaseBody, alignAssetName } from "./util";
 import { statSync } from "fs";
 import { open } from "fs/promises";
-import { getType } from "mime";
+import { lookup } from "mime-types";
 import { basename } from "path";
 
 type GitHub = InstanceType<typeof GitHub>;
@@ -149,7 +149,7 @@ export const asset = (path: string): ReleaseAsset => {
 };
 
 export const mimeOrDefault = (path: string): string => {
-  return getType(path) || "application/octet-stream";
+  return lookup(path) || "application/octet-stream";
 };
 
 export const upload = async (
@@ -188,7 +188,7 @@ export const upload = async (
         "content-type": mime,
         authorization: `token ${config.github_token}`,
       },
-      data: fh.readableWebStream({ type: "bytes" }),
+      data: fh.readableWebStream(),
     });
     const json = resp.data;
     if (resp.status !== 201) {
