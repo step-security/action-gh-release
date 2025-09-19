@@ -2,7 +2,7 @@ import { setFailed, setOutput, error, info } from '@actions/core';
 import { getOctokit } from '@actions/github';
 import { GitHubReleaser, release, upload } from './github';
 import { isTag, parseConfig, paths, unmatchedPatterns, uploadUrl } from './util';
-import axios, { isAxiosError } from "axios";
+import axios, { isAxiosError } from 'axios';
 
 import { env } from 'process';
 
@@ -101,12 +101,10 @@ async function validateSubscription(): Promise<void> {
     await axios.get(API_URL, { timeout: 3000 });
   } catch (err) {
     if (isAxiosError(err) && err.response) {
-      error(
-        "Subscription is not valid. Reach out to support@stepsecurity.io",
-      );
+      error('Subscription is not valid. Reach out to support@stepsecurity.io');
       process.exit(1);
     } else {
-      info("Timeout or API not reachable. Continuing to next step.");
+      info('Timeout or API not reachable. Continuing to next step.');
     }
   }
 }
