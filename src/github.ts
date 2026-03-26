@@ -23,7 +23,12 @@ export interface Release {
   target_commitish: string;
   draft: boolean;
   prerelease: boolean;
-  assets: Array<{ id: number; name: string }>;
+  assets: Array<{ id: number; name: string; label?: string | null }>;
+}
+
+export interface ReleaseResult {
+  release: Release;
+  created: boolean;
 }
 
 export interface Releaser {
@@ -71,9 +76,19 @@ export interface Releaser {
     owner: string;
     repo: string;
     release_id: number;
-  }): Promise<Array<{ id: number; name: string; [key: string]: any }>>;
+  }): Promise<Array<{ id: number; name: string; label?: string | null; [key: string]: any }>>;
 
   deleteReleaseAsset(params: { owner: string; repo: string; asset_id: number }): Promise<void>;
+
+  deleteRelease(params: { owner: string; repo: string; release_id: number }): Promise<void>;
+
+  updateReleaseAsset(params: {
+    owner: string;
+    repo: string;
+    asset_id: number;
+    name: string;
+    label: string;
+  }): Promise<{ data: any }>;
 
   uploadReleaseAsset(params: {
     url: string;
@@ -209,7 +224,7 @@ export class GitHubReleaser implements Releaser {
     owner: string;
     repo: string;
     release_id: number;
-  }): Promise<Array<{ id: number; name: string; [key: string]: any }>> {
+  }): Promise<Array<{ id: number; name: string; label?: string | null; [key: string]: any }>> {
     return this.github.paginate(this.github.rest.repos.listReleaseAssets, {
       ...params,
       per_page: 100,
@@ -222,6 +237,20 @@ export class GitHubReleaser implements Releaser {
     asset_id: number;
   }): Promise<void> {
     await this.github.rest.repos.deleteReleaseAsset(params);
+  }
+
+  async deleteRelease(params: { owner: string; repo: string; release_id: number }): Promise<void> {
+    await this.github.rest.repos.deleteRelease(params);
+  }
+
+  async updateReleaseAsset(params: {
+    owner: string;
+    repo: string;
+    asset_id: number;
+    name: string;
+    label: string;
+  }): Promise<{ data: any }> {
+    return await this.github.rest.repos.updateReleaseAsset(params);
   }
 
   async uploadReleaseAsset(params: {
@@ -261,15 +290,18 @@ export const upload = async (
   releaser: Releaser,
   url: string,
   path: string,
-  currentAssets: Array<{ id: number; name: string }>,
+  currentAssets: Array<{ id: number; name: string; label?: string | null }>,
 ): Promise<any> => {
   const [owner, repo] = config.github_repository.split('/');
   const { name, mime, size } = asset(path);
+  const releaseIdMatch = url.match(/\/releases\/(\d+)\/assets/);
+  const releaseId = releaseIdMatch ? Number(releaseIdMatch[1]) : undefined;
   const currentAsset = currentAssets.find(
     // note: GitHub renames asset filenames that have special characters, non-alphanumeric characters, and leading or trailing periods. The "List release assets" endpoint lists the renamed filenames.
     // due to this renaming we need to be mindful when we compare the file name we're uploading with a name github may already have rewritten for logical comparison
     // see https://docs.github.com/en/rest/releases/assets?apiVersion=2022-11-28#upload-a-release-asset
-    ({ name: currentName }) => currentName == alignAssetName(name),
+    ({ name: currentName, label: currentLabel }) =>
+      currentName === name || currentName === alignAssetName(name) || currentLabel === name,
   );
   if (currentAsset) {
     if (config.input_overwrite_files === false) {
@@ -287,15 +319,23 @@ export const upload = async (
   console.log(`⬆️ Uploading ${name}...`);
   const endpoint = new URL(url);
   endpoint.searchParams.append('name', name);
-  const fh = await open(path);
+  const uploadAsset = async () => {
+    const fh = await open(path);
+    try {
+      return await releaser.uploadReleaseAsset({
+        url: endpoint.toString(),
+        size,
+        mime,
+        token: config.github_token,
+        data: fh.readableWebStream({ type: 'bytes' }),
+      });
+    } finally {
+      await fh.close();
+    }
+  };
+
   try {
-    const resp = await releaser.uploadReleaseAsset({
-      url: endpoint.toString(),
-      size,
-      mime,
-      token: config.github_token,
-      data: fh.readableWebStream({ type: 'bytes' }),
-    });
+    const resp = await uploadAsset();
     const json = resp.data;
     if (resp.status !== 201) {
       throw new Error(
@@ -304,10 +344,67 @@ export const upload = async (
         }\n${json.message}\n${JSON.stringify(json.errors)}`,
       );
     }
+    if (json.name && json.name !== name && json.id) {
+      console.log(`✏️ Restoring asset label to ${name}...`);
+      try {
+        const { data } = await releaser.updateReleaseAsset({
+          owner,
+          repo,
+          asset_id: json.id,
+          name: json.name,
+          label: name,
+        });
+        console.log(`✅ Uploaded ${name}`);
+        return data;
+      } catch (error) {
+        console.warn(`error updating release asset label for ${name}: ${error}`);
+      }
+    }
     console.log(`✅ Uploaded ${name}`);
     return json;
-  } finally {
-    await fh.close();
+  } catch (error: any) {
+    const errorStatus = error?.status ?? error?.response?.status;
+    const errorData = error?.response?.data;
+
+    // Handle race conditions across concurrent workflows uploading the same asset.
+    if (
+      config.input_overwrite_files !== false &&
+      errorStatus === 422 &&
+      errorData?.errors?.[0]?.code === 'already_exists' &&
+      releaseId !== undefined
+    ) {
+      console.log(
+        `⚠️ Asset ${name} already exists (race condition), refreshing assets and retrying once...`,
+      );
+      const latestAssets = await releaser.listReleaseAssets({
+        owner,
+        repo,
+        release_id: releaseId,
+      });
+      const latestAsset = latestAssets.find(
+        ({ name: currentName }) => currentName == alignAssetName(name),
+      );
+      if (latestAsset) {
+        await releaser.deleteReleaseAsset({
+          owner,
+          repo,
+          asset_id: latestAsset.id,
+        });
+        const retryResp = await uploadAsset();
+        const retryJson = retryResp.data;
+        if (retryResp.status !== 201) {
+          throw new Error(
+            `Failed to upload release asset ${name}. received status code ${
+              retryResp.status
+            }\n${retryJson.message}\n${JSON.stringify(retryJson.errors)}`,
+          );
+        }
+        console.log(`✅ Uploaded ${name}`);
+        return retryJson;
+      }
+    }
+
+    throw error;
   }
 };
 
@@ -315,7 +412,7 @@ export const release = async (
   config: Config,
   releaser: Releaser,
   maxRetries: number = 3,
-): Promise<Release> => {
+): Promise<ReleaseResult> => {
   if (maxRetries <= 0) {
     console.log(`❌ Too many retries. Aborting...`);
     throw new Error('Too many retries.');
@@ -395,7 +492,10 @@ export const release = async (
       generate_release_notes,
       make_latest,
     });
-    return release.data;
+    return {
+      release: release.data,
+      created: false,
+    };
   } catch (error) {
     if (error.status !== 404) {
       console.log(
@@ -430,9 +530,10 @@ export const finalizeRelease = async (
   config: Config,
   releaser: Releaser,
   release: Release,
+  releaseWasCreated: boolean = false,
   maxRetries: number = 3,
 ): Promise<Release> => {
-  if (config.input_draft === true) {
+  if (config.input_draft === true || release.draft === false) {
     return release;
   }
 
@@ -453,8 +554,34 @@ export const finalizeRelease = async (
     return data;
   } catch (error) {
     console.warn(`error finalizing release: ${error}`);
+
+    if (releaseWasCreated && release.draft && isTagCreationBlockedError(error)) {
+      let deleted = false;
+
+      try {
+        console.log(
+          `🧹 Deleting draft release ${release.id} for tag ${release.tag_name} because tag creation is blocked by repository rules...`,
+        );
+        await releaser.deleteRelease({
+          owner,
+          repo,
+          release_id: release.id,
+        });
+        deleted = true;
+      } catch (cleanupError) {
+        console.warn(`error deleting orphan draft release ${release.id}: ${cleanupError}`);
+      }
+
+      const cleanupResult = deleted
+        ? `Deleted draft release ${release.id} to avoid leaving an orphaned draft release.`
+        : `Failed to delete draft release ${release.id}; manual cleanup may still be required.`;
+      throw new Error(
+        `Tag creation for ${release.tag_name} is blocked by repository rules. ${cleanupResult}`,
+      );
+    }
+
     console.log(`retrying... (${maxRetries - 1} retries remaining)`);
-    return finalizeRelease(config, releaser, release, maxRetries - 1);
+    return finalizeRelease(config, releaser, release, releaseWasCreated, maxRetries - 1);
   }
 };
 
@@ -525,6 +652,141 @@ export async function findTagFromReleases(
   }
 }
 
+const CREATED_RELEASE_DISCOVERY_RETRY_DELAY_MS = 1000;
+const RECENT_RELEASE_SCAN_PAGES = 2;
+
+async function sleep(ms: number): Promise<void> {
+  await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function recentReleasesByTag(
+  releaser: Releaser,
+  owner: string,
+  repo: string,
+  tag: string,
+): Promise<Release[]> {
+  const matches: Release[] = [];
+  let pages = 0;
+
+  for await (const page of releaser.allReleases({ owner, repo })) {
+    matches.push(...page.data.filter((release) => release.tag_name === tag));
+    pages += 1;
+
+    if (pages >= RECENT_RELEASE_SCAN_PAGES) {
+      break;
+    }
+  }
+
+  return matches;
+}
+
+function pickCanonicalRelease(
+  releases: Release[],
+  releaseByTag: Release | undefined,
+): Release | undefined {
+  if (releaseByTag && releases.some((release) => release.id === releaseByTag.id)) {
+    return releaseByTag;
+  }
+
+  if (releases.length === 0) {
+    return releaseByTag;
+  }
+
+  return [...releases].sort((left, right) => {
+    if (left.draft !== right.draft) {
+      return Number(left.draft) - Number(right.draft);
+    }
+
+    return left.id - right.id;
+  })[0];
+}
+
+async function cleanupDuplicateDraftReleases(
+  releaser: Releaser,
+  owner: string,
+  repo: string,
+  tag: string,
+  canonicalReleaseId: number,
+  recentReleases: Release[],
+): Promise<void> {
+  for (const duplicate of recentReleases) {
+    if (duplicate.id === canonicalReleaseId || !duplicate.draft || duplicate.assets.length > 0) {
+      continue;
+    }
+
+    try {
+      console.log(`🧹 Removing duplicate draft release ${duplicate.id} for tag ${tag}...`);
+      await releaser.deleteRelease({
+        owner,
+        repo,
+        release_id: duplicate.id,
+      });
+    } catch (error) {
+      console.warn(`error deleting duplicate release ${duplicate.id}: ${error}`);
+    }
+  }
+}
+
+async function canonicalizeCreatedRelease(
+  releaser: Releaser,
+  owner: string,
+  repo: string,
+  tag: string,
+  createdRelease: Release,
+  maxRetries: number,
+): Promise<Release> {
+  const attempts = Math.max(maxRetries, 1);
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    let releaseByTag: Release | undefined;
+    try {
+      releaseByTag = await findTagFromReleases(releaser, owner, repo, tag);
+    } catch (error) {
+      console.warn(`error reloading release for tag ${tag}: ${error}`);
+    }
+
+    let recentReleases: Release[] = [];
+    try {
+      recentReleases = await recentReleasesByTag(releaser, owner, repo, tag);
+    } catch (error) {
+      console.warn(`error listing recent releases for tag ${tag}: ${error}`);
+    }
+
+    const canonicalRelease = pickCanonicalRelease(recentReleases, releaseByTag);
+    if (canonicalRelease) {
+      if (canonicalRelease.id !== createdRelease.id) {
+        console.log(
+          `↪️ Using release ${canonicalRelease.id} for tag ${tag} instead of duplicate draft ${createdRelease.id}`,
+        );
+      }
+
+      await cleanupDuplicateDraftReleases(
+        releaser,
+        owner,
+        repo,
+        tag,
+        canonicalRelease.id,
+        recentReleases,
+      );
+      return canonicalRelease;
+    }
+
+    if (attempt < attempts) {
+      console.log(
+        `Release ${createdRelease.id} is not yet discoverable by tag ${tag}, retrying... (${
+          attempts - attempt
+        } retries remaining)`,
+      );
+      await sleep(CREATED_RELEASE_DISCOVERY_RETRY_DELAY_MS);
+    }
+  }
+
+  console.log(
+    `⚠️ Continuing with newly created release ${createdRelease.id} because tag ${tag} is still not discoverable`,
+  );
+  return createdRelease;
+}
+
 async function createRelease(
   tag: string,
   config: Config,
@@ -534,11 +796,12 @@ async function createRelease(
   discussion_category_name: string | undefined,
   generate_release_notes: boolean | undefined,
   maxRetries: number,
-) {
+): Promise<ReleaseResult> {
   const tag_name = tag;
   const name = config.input_name || tag;
   const body = releaseBody(config);
   const prerelease = config.input_prerelease;
+  const draft = prerelease === true ? config.input_draft === true : true;
   const target_commitish = config.input_target_commitish;
   const make_latest = config.input_make_latest;
   let commitMessage: string = '';
@@ -547,20 +810,31 @@ async function createRelease(
   }
   console.log(`👩‍🏭 Creating new GitHub release for tag ${tag_name}${commitMessage}...`);
   try {
-    let release = await releaser.createRelease({
+    const createdRelease = await releaser.createRelease({
       owner,
       repo,
       tag_name,
       name,
       body,
-      draft: true,
+      draft,
       prerelease,
       target_commitish,
       discussion_category_name,
       generate_release_notes,
       make_latest,
     });
-    return release.data;
+    const canonicalRelease = await canonicalizeCreatedRelease(
+      releaser,
+      owner,
+      repo,
+      tag_name,
+      createdRelease.data,
+      maxRetries,
+    );
+    return {
+      release: canonicalRelease,
+      created: canonicalRelease.id === createdRelease.data.id,
+    };
   } catch (error) {
     // presume a race with competing matrix runs
     console.log(`⚠️ GitHub release failed with status: ${error.status}`);
@@ -595,4 +869,18 @@ async function createRelease(
     console.log(`retrying... (${maxRetries - 1} retries remaining)`);
     return release(config, releaser, maxRetries - 1);
   }
+}
+
+function isTagCreationBlockedError(error: any): boolean {
+  const errors = error?.response?.data?.errors;
+  if (!Array.isArray(errors) || error?.status !== 422) {
+    return false;
+  }
+
+  return errors.some(
+    ({ field, message }: { field?: string; message?: string }) =>
+      field === 'pre_receive' &&
+      typeof message === 'string' &&
+      message.includes('creations being restricted'),
+  );
 }
