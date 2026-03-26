@@ -498,6 +498,58 @@ describe('github', () => {
       assert.equal(result.created, false);
     });
 
+    it('normalizes refs/tags-prefixed input_tag_name values before reusing an existing release', async () => {
+      const existingRelease: Release = {
+        id: 1,
+        upload_url: 'test',
+        html_url: 'test',
+        tag_name: 'v1.0.0',
+        name: 'test',
+        body: 'test',
+        target_commitish: 'main',
+        draft: false,
+        prerelease: false,
+        assets: [],
+      };
+
+      const updateReleaseSpy = vi.fn(async () => ({ data: existingRelease }));
+      const getReleaseByTagSpy = vi.fn(async () => ({ data: existingRelease }));
+      const result = await release(
+        {
+          ...config,
+          input_tag_name: 'refs/tags/v1.0.0',
+        },
+        {
+          getReleaseByTag: getReleaseByTagSpy,
+          createRelease: () => Promise.reject('Not implemented'),
+          updateRelease: updateReleaseSpy,
+          finalizeRelease: () => Promise.reject('Not implemented'),
+          allReleases: async function* () {
+            yield { data: [existingRelease] };
+          },
+          listReleaseAssets: () => Promise.reject('Not implemented'),
+          deleteReleaseAsset: () => Promise.reject('Not implemented'),
+          deleteRelease: () => Promise.reject('Not implemented'),
+          updateReleaseAsset: () => Promise.reject('Not implemented'),
+          uploadReleaseAsset: () => Promise.reject('Not implemented'),
+        },
+        1,
+      );
+
+      expect(getReleaseByTagSpy).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        tag: 'v1.0.0',
+      });
+      expect(updateReleaseSpy).toHaveBeenCalledWith(
+        expect.objectContaining({
+          tag_name: 'v1.0.0',
+        }),
+      );
+      assert.equal(result.release.id, existingRelease.id);
+      assert.equal(result.created, false);
+    });
+
     it('reuses a canonical release after concurrent create success and removes empty duplicates', async () => {
       const canonicalRelease: Release = {
         id: 1,
@@ -601,6 +653,66 @@ describe('github', () => {
       };
 
       const result = await release(config, mockReleaser, 1);
+
+      assert.equal(result.release.id, canonicalRelease.id);
+      assert.equal(result.created, false);
+      expect(deleteReleaseSpy).toHaveBeenCalledWith({
+        owner: 'owner',
+        repo: 'repo',
+        release_id: duplicateRelease.id,
+      });
+    });
+
+    it('deletes the just-created duplicate draft even if recent release listing misses it', async () => {
+      const canonicalRelease: Release = {
+        id: 1,
+        upload_url: 'canonical-upload',
+        html_url: 'canonical-html',
+        tag_name: 'v1.0.0',
+        name: 'canonical',
+        body: 'test',
+        target_commitish: 'main',
+        draft: true,
+        prerelease: false,
+        assets: [],
+      };
+      const duplicateRelease: Release = {
+        id: 2,
+        upload_url: 'duplicate-upload',
+        html_url: 'duplicate-html',
+        tag_name: 'v1.0.0',
+        name: 'duplicate',
+        body: 'test',
+        target_commitish: 'main',
+        draft: true,
+        prerelease: false,
+        assets: [],
+      };
+
+      let lookupCount = 0;
+      const deleteReleaseSpy = vi.fn(async () => undefined);
+      const mockReleaser: Releaser = {
+        getReleaseByTag: () => {
+          lookupCount += 1;
+          if (lookupCount === 1) {
+            return Promise.reject({ status: 404 });
+          }
+          return Promise.resolve({ data: canonicalRelease });
+        },
+        createRelease: () => Promise.resolve({ data: duplicateRelease }),
+        updateRelease: () => Promise.reject('Not implemented'),
+        finalizeRelease: () => Promise.reject('Not implemented'),
+        allReleases: async function* () {
+          yield { data: [canonicalRelease] };
+        },
+        listReleaseAssets: () => Promise.reject('Not implemented'),
+        deleteReleaseAsset: () => Promise.reject('Not implemented'),
+        deleteRelease: deleteReleaseSpy,
+        updateReleaseAsset: () => Promise.reject('Not implemented'),
+        uploadReleaseAsset: () => Promise.reject('Not implemented'),
+      };
+
+      const result = await release(config, mockReleaser, 2);
 
       assert.equal(result.release.id, canonicalRelease.id);
       assert.equal(result.created, false);

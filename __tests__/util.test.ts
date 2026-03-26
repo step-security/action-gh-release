@@ -1,6 +1,10 @@
 import {
   alignAssetName,
+  expandHomePattern,
   isTag,
+  normalizeFilePattern,
+  normalizeGlobPattern,
+  normalizeTagName,
   parseConfig,
   parseInputFiles,
   paths,
@@ -292,7 +296,7 @@ describe('util', () => {
       );
     });
 
-    it('prefers GITHUB_TOKEN over token input for backwards compatibility', () => {
+    it('prefers token input over GITHUB_TOKEN', () => {
       assert.deepStrictEqual(
         parseConfig({
           INPUT_DRAFT: 'false',
@@ -304,7 +308,7 @@ describe('util', () => {
         {
           github_ref: '',
           github_repository: '',
-          github_token: 'env-token',
+          github_token: 'input-token',
           input_working_directory: undefined,
           input_append_body: false,
           input_body: undefined,
@@ -312,6 +316,35 @@ describe('util', () => {
           input_draft: false,
           input_prerelease: true,
           input_preserve_order: true,
+          input_files: [],
+          input_overwrite_files: undefined,
+          input_name: undefined,
+          input_tag_name: undefined,
+          input_fail_on_unmatched_files: false,
+          input_target_commitish: undefined,
+          input_discussion_category_name: undefined,
+          input_generate_release_notes: false,
+          input_make_latest: undefined,
+        },
+      );
+    });
+    it('falls back to GITHUB_TOKEN when token input is empty', () => {
+      assert.deepStrictEqual(
+        parseConfig({
+          GITHUB_TOKEN: 'env-token',
+          INPUT_TOKEN: '   ',
+        }),
+        {
+          github_ref: '',
+          github_repository: '',
+          github_token: 'env-token',
+          input_working_directory: undefined,
+          input_append_body: false,
+          input_body: undefined,
+          input_body_path: undefined,
+          input_draft: undefined,
+          input_prerelease: undefined,
+          input_preserve_order: undefined,
           input_files: [],
           input_overwrite_files: undefined,
           input_name: undefined,
@@ -439,6 +472,10 @@ describe('util', () => {
         },
       );
     });
+
+    it('normalizes refs/tags-prefixed input_tag_name values', () => {
+      expect(parseConfig({ INPUT_TAG_NAME: 'refs/tags/v1.2.3' }).input_tag_name).toBe('v1.2.3');
+    });
   });
   describe('isTag', () => {
     it('returns true for tags', async () => {
@@ -446,6 +483,16 @@ describe('util', () => {
     });
     it('returns false for other kinds of refs', async () => {
       assert.equal(isTag('refs/heads/master'), false);
+    });
+  });
+
+  describe('normalizeTagName', () => {
+    it('strips refs/tags/ from explicit tag names', () => {
+      assert.equal(normalizeTagName('refs/tags/v1.2.3'), 'v1.2.3');
+    });
+
+    it('leaves plain tag names unchanged', () => {
+      assert.equal(normalizeTagName('v1.2.3'), 'v1.2.3');
     });
   });
 
@@ -473,6 +520,56 @@ describe('util', () => {
       assert.deepStrictEqual(unmatchedPatterns(['data/does/not/exist/*'], 'tests'), [
         'data/does/not/exist/*',
       ]);
+    });
+  });
+
+  describe('normalizeGlobPattern', () => {
+    it('preserves posix-style patterns on non-windows platforms', () => {
+      assert.equal(normalizeGlobPattern('./dist/**/*.tgz', 'linux'), './dist/**/*.tgz');
+    });
+
+    it('normalizes relative windows-style glob patterns', () => {
+      assert.equal(
+        normalizeGlobPattern('.\\release-assets\\rssguard-*win7.exe', 'win32'),
+        './release-assets/rssguard-*win7.exe',
+      );
+    });
+
+    it('normalizes absolute windows-style glob patterns', () => {
+      assert.equal(
+        normalizeGlobPattern('D:\\a\\repo\\build\\packages\\*', 'win32'),
+        'D:/a/repo/build/packages/*',
+      );
+    });
+  });
+
+  describe('expandHomePattern', () => {
+    it('expands a bare tilde to the provided home directory', () => {
+      assert.equal(expandHomePattern('~', '/home/runner'), '/home/runner');
+    });
+
+    it('expands posix-style tilde paths', () => {
+      assert.equal(expandHomePattern('~/release.txt', '/home/runner'), '/home/runner/release.txt');
+    });
+
+    it('leaves non-tilde paths unchanged', () => {
+      assert.equal(expandHomePattern('./release.txt', '/home/runner'), './release.txt');
+    });
+  });
+
+  describe('normalizeFilePattern', () => {
+    it('expands tilde paths before globbing', () => {
+      assert.equal(
+        normalizeFilePattern('~/release-assets/*.tgz', 'linux', '/home/runner'),
+        '/home/runner/release-assets/*.tgz',
+      );
+    });
+
+    it('expands tilde paths and normalizes windows separators', () => {
+      assert.equal(
+        normalizeFilePattern('~\\release-assets\\*.zip', 'win32', 'C:\\Users\\runner'),
+        'C:/Users/runner/release-assets/*.zip',
+      );
     });
   });
 

@@ -1,5 +1,6 @@
 import * as glob from 'glob';
 import { statSync, readFileSync } from 'fs';
+import { homedir } from 'os';
 import * as pathLib from 'path';
 
 export interface Config {
@@ -84,13 +85,21 @@ export const parseInputFiles = (files: string): string[] => {
     .filter((pat) => pat.trim() !== '');
 };
 
+const parseToken = (env: Env): string => {
+  const inputToken = env.INPUT_TOKEN?.trim();
+  if (inputToken) {
+    return inputToken;
+  }
+  return env.GITHUB_TOKEN?.trim() || '';
+};
+
 export const parseConfig = (env: Env): Config => {
   return {
-    github_token: env.GITHUB_TOKEN || env.INPUT_TOKEN || '',
+    github_token: parseToken(env),
     github_ref: env.GITHUB_REF || '',
     github_repository: env.INPUT_REPOSITORY || env.GITHUB_REPOSITORY || '',
     input_name: env.INPUT_NAME,
-    input_tag_name: env.INPUT_TAG_NAME?.trim(),
+    input_tag_name: normalizeTagName(env.INPUT_TAG_NAME?.trim()),
     input_body: env.INPUT_BODY,
     input_body_path: env.INPUT_BODY_PATH,
     input_files: parseInputFiles(env.INPUT_FILES || ''),
@@ -117,11 +126,39 @@ const parseMakeLatest = (value: string | undefined): 'true' | 'false' | 'legacy'
   return undefined;
 };
 
+export const normalizeGlobPattern = (
+  pattern: string,
+  platform: NodeJS.Platform = process.platform,
+): string => {
+  if (platform === 'win32') {
+    return pattern.replace(/\\/g, '/');
+  }
+  return pattern;
+};
+
+export const expandHomePattern = (pattern: string, homeDirectory: string = homedir()): string => {
+  if (pattern === '~') {
+    return homeDirectory;
+  }
+  if (pattern.startsWith('~/') || pattern.startsWith('~\\')) {
+    return pathLib.join(homeDirectory, pattern.slice(2));
+  }
+  return pattern;
+};
+
+export const normalizeFilePattern = (
+  pattern: string,
+  platform: NodeJS.Platform = process.platform,
+  homeDirectory: string = homedir(),
+): string => {
+  return normalizeGlobPattern(expandHomePattern(pattern, homeDirectory), platform);
+};
+
 export const paths = (patterns: string[], cwd?: string): string[] => {
   return patterns.reduce((acc: string[], pattern: string): string[] => {
-    const matches = glob.sync(pattern, { cwd, dot: true, absolute: false });
+    const matches = glob.sync(normalizeFilePattern(pattern), { cwd, dot: true, absolute: false });
     const resolved = matches
-      .map((p) => (cwd ? pathLib.join(cwd, p) : p))
+      .map((p) => (cwd && !pathLib.isAbsolute(p) ? pathLib.join(cwd, p) : p))
       .filter((p) => {
         try {
           return statSync(p).isFile();
@@ -135,10 +172,10 @@ export const paths = (patterns: string[], cwd?: string): string[] => {
 
 export const unmatchedPatterns = (patterns: string[], cwd?: string): string[] => {
   return patterns.reduce((acc: string[], pattern: string): string[] => {
-    const matches = glob.sync(pattern, { cwd, dot: true, absolute: false });
+    const matches = glob.sync(normalizeFilePattern(pattern), { cwd, dot: true, absolute: false });
     const files = matches.filter((p) => {
       try {
-        const full = cwd ? pathLib.join(cwd, p) : p;
+        const full = cwd && !pathLib.isAbsolute(p) ? pathLib.join(cwd, p) : p;
         return statSync(full).isFile();
       } catch {
         return false;
@@ -150,6 +187,13 @@ export const unmatchedPatterns = (patterns: string[], cwd?: string): string[] =>
 
 export const isTag = (ref: string): boolean => {
   return ref.startsWith('refs/tags/');
+};
+
+export const normalizeTagName = (tag: string | undefined): string | undefined => {
+  if (!tag) {
+    return tag;
+  }
+  return isTag(tag) ? tag.replace('refs/tags/', '') : tag;
 };
 
 export const alignAssetName = (assetName: string): string => {
