@@ -62,9 +62,26 @@ export interface Releaser {
     owner: string;
     repo: string;
     release_id: number;
+    make_latest: 'true' | 'false' | 'legacy' | undefined;
   }): Promise<{ data: Release }>;
 
-  allReleases(params: { owner: string; repo: string }): AsyncIterableIterator<{ data: Release[] }>;
+  allReleases(params: { owner: string; repo: string }): AsyncIterable<{ data: Release[] }>;
+
+  listReleaseAssets(params: {
+    owner: string;
+    repo: string;
+    release_id: number;
+  }): Promise<Array<{ id: number; name: string; [key: string]: any }>>;
+
+  deleteReleaseAsset(params: { owner: string; repo: string; asset_id: number }): Promise<void>;
+
+  uploadReleaseAsset(params: {
+    url: string;
+    size: number;
+    mime: string;
+    token: string;
+    data: any;
+  }): Promise<{ status: number; data: any }>;
 }
 
 export class GitHubReleaser implements Releaser {
@@ -166,20 +183,64 @@ export class GitHubReleaser implements Releaser {
     return this.github.rest.repos.updateRelease(params);
   }
 
-  async finalizeRelease(params: { owner: string; repo: string; release_id: number }) {
+  async finalizeRelease(params: {
+    owner: string;
+    repo: string;
+    release_id: number;
+    make_latest: 'true' | 'false' | 'legacy' | undefined;
+  }) {
     return await this.github.rest.repos.updateRelease({
       owner: params.owner,
       repo: params.repo,
       release_id: params.release_id,
       draft: false,
+      make_latest: params.make_latest,
     });
   }
 
-  allReleases(params: { owner: string; repo: string }): AsyncIterableIterator<{ data: Release[] }> {
+  allReleases(params: { owner: string; repo: string }): AsyncIterable<{ data: Release[] }> {
     const updatedParams = { per_page: 100, ...params };
     return this.github.paginate.iterator(
       this.github.rest.repos.listReleases.endpoint.merge(updatedParams),
     );
+  }
+
+  async listReleaseAssets(params: {
+    owner: string;
+    repo: string;
+    release_id: number;
+  }): Promise<Array<{ id: number; name: string; [key: string]: any }>> {
+    return this.github.paginate(this.github.rest.repos.listReleaseAssets, {
+      ...params,
+      per_page: 100,
+    });
+  }
+
+  async deleteReleaseAsset(params: {
+    owner: string;
+    repo: string;
+    asset_id: number;
+  }): Promise<void> {
+    await this.github.rest.repos.deleteReleaseAsset(params);
+  }
+
+  async uploadReleaseAsset(params: {
+    url: string;
+    size: number;
+    mime: string;
+    token: string;
+    data: any;
+  }): Promise<{ status: number; data: any }> {
+    return this.github.request({
+      method: 'POST',
+      url: params.url,
+      headers: {
+        'content-length': `${params.size}`,
+        'content-type': params.mime,
+        authorization: `token ${params.token}`,
+      },
+      data: params.data,
+    });
   }
 }
 
@@ -197,7 +258,7 @@ export const mimeOrDefault = (path: string): string => {
 
 export const upload = async (
   config: Config,
-  github: GitHub,
+  releaser: Releaser,
   url: string,
   path: string,
   currentAssets: Array<{ id: number; name: string }>,
@@ -216,7 +277,7 @@ export const upload = async (
       return null;
     } else {
       console.log(`♻️ Deleting previously uploaded asset ${name}...`);
-      await github.rest.repos.deleteReleaseAsset({
+      await releaser.deleteReleaseAsset({
         asset_id: currentAsset.id || 1,
         owner,
         repo,
@@ -228,14 +289,11 @@ export const upload = async (
   endpoint.searchParams.append('name', name);
   const fh = await open(path);
   try {
-    const resp = await github.request({
-      method: 'POST',
+    const resp = await releaser.uploadReleaseAsset({
       url: endpoint.toString(),
-      headers: {
-        'content-length': `${size}`,
-        'content-type': mime,
-        authorization: `token ${config.github_token}`,
-      },
+      size,
+      mime,
+      token: config.github_token,
       data: fh.readableWebStream({ type: 'bytes' }),
     });
     const json = resp.data;
@@ -389,17 +447,58 @@ export const finalizeRelease = async (
       owner,
       repo,
       release_id: release.id,
+      make_latest: config.input_make_latest,
     });
 
     return data;
-  } catch {
+  } catch (error) {
+    console.warn(`error finalizing release: ${error}`);
     console.log(`retrying... (${maxRetries - 1} retries remaining)`);
     return finalizeRelease(config, releaser, release, maxRetries - 1);
   }
 };
 
 /**
- * Finds a release by tag name from all a repository's releases.
+ * Lists assets belonging to a release.
+ *
+ * @param config - Release configuration as specified by user
+ * @param releaser - The GitHub API wrapper for release operations
+ * @param release - The existing release to be checked
+ * @param maxRetries - The maximum number of attempts
+ */
+export const listReleaseAssets = async (
+  config: Config,
+  releaser: Releaser,
+  release: Release,
+  maxRetries: number = 3,
+): Promise<Array<{ id: number; name: string; [key: string]: any }>> => {
+  if (maxRetries <= 0) {
+    console.log(`❌ Too many retries. Aborting...`);
+    throw new Error('Too many retries.');
+  }
+
+  const [owner, repo] = config.github_repository.split('/');
+  try {
+    const assets = await releaser.listReleaseAssets({
+      owner,
+      repo,
+      release_id: release.id,
+    });
+
+    return assets;
+  } catch (error) {
+    console.warn(`error listing assets of release: ${error}`);
+    console.log(`retrying... (${maxRetries - 1} retries remaining)`);
+    return listReleaseAssets(config, releaser, release, maxRetries - 1);
+  }
+};
+
+/**
+ * Finds a release by tag name.
+ *
+ * Uses the direct getReleaseByTag API for O(1) lookup instead of iterating
+ * through all releases. This also avoids GitHub's API pagination limit of
+ * 10000 results which would cause failures for repositories with many releases.
  *
  * @param releaser - The GitHub API wrapper for release operations
  * @param owner - The owner of the repository
@@ -413,16 +512,17 @@ export async function findTagFromReleases(
   repo: string,
   tag: string,
 ): Promise<Release | undefined> {
-  for await (const { data: releases } of releaser.allReleases({
-    owner,
-    repo,
-  })) {
-    const release = releases.find((release) => release.tag_name === tag);
-    if (release) {
-      return release;
+  try {
+    const { data: release } = await releaser.getReleaseByTag({ owner, repo, tag });
+    return release;
+  } catch (error) {
+    // Release not found (404) or other error - return undefined to allow creation
+    if (error.status === 404) {
+      return undefined;
     }
+    // Re-throw unexpected errors
+    throw error;
   }
-  return undefined;
 }
 
 async function createRelease(

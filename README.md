@@ -41,7 +41,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Release
         uses: step-security/action-gh-release@v2
         if: github.ref_type == 'tag'
@@ -62,7 +62,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Release
         uses: step-security/action-gh-release@v2
 ```
@@ -89,7 +89,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Build
         run: echo ${{ github.sha }} > Release.txt
       - name: Test
@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Build
         run: echo ${{ github.sha }} > Release.txt
       - name: Test
@@ -147,7 +147,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v5
+        uses: actions/checkout@v6
       - name: Generate Changelog
         run: echo "# Good things have arrived" > ${{ github.workspace }}-CHANGELOG.txt
       - name: Release
@@ -203,7 +203,7 @@ The following outputs can be accessed via `${{ steps.<step-id>.outputs }}` from 
 | `url`        | String | Github.com URL for the release                                                                                                                                                            |
 | `id`         | String | Release ID                                                                                                                                                                                |
 | `upload_url` | String | URL for uploading assets to the release                                                                                                                                                   |
-| `assets`     | String | JSON array containing information about each uploaded asset, in the format given [here](https://docs.github.com/en/rest/releases/assets#get-a-release-asset) (minus the `uploader` field) |
+| `assets`     | String | JSON array containing information about each updated (newly uploaded or overwritten) asset, in the format given [here](https://docs.github.com/en/rest/releases/assets#get-a-release-asset) (minus the `uploader` field) |
 
 As an example, you can use `${{ fromJSON(steps.<step-id>.outputs.assets)[0].browser_download_url }}` to get the download URL of the first asset.
 
