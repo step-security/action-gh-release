@@ -31,37 +31,40 @@ export interface ReleaseResult {
   created: boolean;
 }
 
+type ReleaseNotesParams = {
+  owner: string;
+  repo: string;
+  tag_name: string;
+  target_commitish: string | undefined;
+  previous_tag_name?: string;
+};
+
+type ReleaseMutationParams = {
+  owner: string;
+  repo: string;
+  tag_name: string;
+  name: string;
+  body: string | undefined;
+  draft: boolean | undefined;
+  prerelease: boolean | undefined;
+  target_commitish: string | undefined;
+  discussion_category_name: string | undefined;
+  generate_release_notes: boolean | undefined;
+  make_latest: 'true' | 'false' | 'legacy' | undefined;
+  previous_tag_name?: string;
+};
+
 export interface Releaser {
   getReleaseByTag(params: { owner: string; repo: string; tag: string }): Promise<{ data: Release }>;
 
-  createRelease(params: {
-    owner: string;
-    repo: string;
-    tag_name: string;
-    name: string;
-    body: string | undefined;
-    draft: boolean | undefined;
-    prerelease: boolean | undefined;
-    target_commitish: string | undefined;
-    discussion_category_name: string | undefined;
-    generate_release_notes: boolean | undefined;
-    make_latest: 'true' | 'false' | 'legacy' | undefined;
-  }): Promise<{ data: Release }>;
+  createRelease(params: ReleaseMutationParams): Promise<{ data: Release }>;
 
-  updateRelease(params: {
-    owner: string;
-    repo: string;
-    release_id: number;
-    tag_name: string;
-    target_commitish: string;
-    name: string;
-    body: string | undefined;
-    draft: boolean | undefined;
-    prerelease: boolean | undefined;
-    discussion_category_name: string | undefined;
-    generate_release_notes: boolean | undefined;
-    make_latest: 'true' | 'false' | 'legacy' | undefined;
-  }): Promise<{ data: Release }>;
+  updateRelease(
+    params: ReleaseMutationParams & {
+      release_id: number;
+      target_commitish: string;
+    },
+  ): Promise<{ data: Release }>;
 
   finalizeRelease(params: {
     owner: string;
@@ -113,12 +116,7 @@ export class GitHubReleaser implements Releaser {
     return this.github.rest.repos.getReleaseByTag(params);
   }
 
-  async getReleaseNotes(params: {
-    owner: string;
-    repo: string;
-    tag_name: string;
-    target_commitish: string | undefined;
-  }): Promise<{
+  async getReleaseNotes(params: ReleaseNotesParams): Promise<{
     data: {
       name: string;
       body: string;
@@ -127,75 +125,55 @@ export class GitHubReleaser implements Releaser {
     return await this.github.rest.repos.generateReleaseNotes(params);
   }
 
+  private async prepareReleaseMutation<T extends ReleaseMutationParams>(
+    params: T,
+  ): Promise<Omit<T, 'previous_tag_name'>> {
+    const { previous_tag_name, ...releaseParams } = params;
+
+    if (
+      typeof releaseParams.make_latest === 'string' &&
+      !['true', 'false', 'legacy'].includes(releaseParams.make_latest)
+    ) {
+      releaseParams.make_latest = undefined;
+    }
+    if (releaseParams.generate_release_notes) {
+      const releaseNotes = await this.getReleaseNotes({
+        owner: releaseParams.owner,
+        repo: releaseParams.repo,
+        tag_name: releaseParams.tag_name,
+        target_commitish: releaseParams.target_commitish,
+        previous_tag_name,
+      });
+      releaseParams.generate_release_notes = false;
+      if (releaseParams.body) {
+        releaseParams.body = `${releaseParams.body}\n\n${releaseNotes.data.body}`;
+      } else {
+        releaseParams.body = releaseNotes.data.body;
+      }
+    }
+    releaseParams.body = releaseParams.body
+      ? this.truncateReleaseNotes(releaseParams.body)
+      : undefined;
+    return releaseParams;
+  }
+
   truncateReleaseNotes(input: string): string {
     // release notes can be a maximum of 125000 characters
     const githubNotesMaxCharLength = 125000;
     return input.substring(0, githubNotesMaxCharLength - 1);
   }
 
-  async createRelease(params: {
-    owner: string;
-    repo: string;
-    tag_name: string;
-    name: string;
-    body: string | undefined;
-    draft: boolean | undefined;
-    prerelease: boolean | undefined;
-    target_commitish: string | undefined;
-    discussion_category_name: string | undefined;
-    generate_release_notes: boolean | undefined;
-    make_latest: 'true' | 'false' | 'legacy' | undefined;
-  }): Promise<{ data: Release }> {
-    if (
-      typeof params.make_latest === 'string' &&
-      !['true', 'false', 'legacy'].includes(params.make_latest)
-    ) {
-      params.make_latest = undefined;
-    }
-    if (params.generate_release_notes) {
-      const releaseNotes = await this.getReleaseNotes(params);
-      params.generate_release_notes = false;
-      if (params.body) {
-        params.body = `${params.body}\n\n${releaseNotes.data.body}`;
-      } else {
-        params.body = releaseNotes.data.body;
-      }
-    }
-    params.body = params.body ? this.truncateReleaseNotes(params.body) : undefined;
-    return this.github.rest.repos.createRelease(params);
+  async createRelease(params: ReleaseMutationParams): Promise<{ data: Release }> {
+    return this.github.rest.repos.createRelease(await this.prepareReleaseMutation(params));
   }
 
-  async updateRelease(params: {
-    owner: string;
-    repo: string;
-    release_id: number;
-    tag_name: string;
-    target_commitish: string;
-    name: string;
-    body: string | undefined;
-    draft: boolean | undefined;
-    prerelease: boolean | undefined;
-    discussion_category_name: string | undefined;
-    generate_release_notes: boolean | undefined;
-    make_latest: 'true' | 'false' | 'legacy' | undefined;
-  }): Promise<{ data: Release }> {
-    if (
-      typeof params.make_latest === 'string' &&
-      !['true', 'false', 'legacy'].includes(params.make_latest)
-    ) {
-      params.make_latest = undefined;
-    }
-    if (params.generate_release_notes) {
-      const releaseNotes = await this.getReleaseNotes(params);
-      params.generate_release_notes = false;
-      if (params.body) {
-        params.body = `${params.body}\n\n${releaseNotes.data.body}`;
-      } else {
-        params.body = releaseNotes.data.body;
-      }
-    }
-    params.body = params.body ? this.truncateReleaseNotes(params.body) : undefined;
-    return this.github.rest.repos.updateRelease(params);
+  async updateRelease(
+    params: ReleaseMutationParams & {
+      release_id: number;
+      target_commitish: string;
+    },
+  ): Promise<{ data: Release }> {
+    return this.github.rest.repos.updateRelease(await this.prepareReleaseMutation(params));
   }
 
   async finalizeRelease(params: {
@@ -285,6 +263,41 @@ export const mimeOrDefault = (path: string): string => {
   return lookup(path) || 'application/octet-stream';
 };
 
+const releaseAssetMatchesName = (
+  name: string,
+  asset: { name: string; label?: string | null },
+): boolean => asset.name === name || asset.name === alignAssetName(name) || asset.label === name;
+
+const isReleaseAssetUpdateNotFound = (error: any): boolean => {
+  const errorStatus = error?.status ?? error?.response?.status;
+  const requestUrl = error?.request?.url;
+  const errorMessage = error?.message;
+  const isReleaseAssetRequest =
+    typeof requestUrl === 'string' &&
+    (/\/releases\/assets\//.test(requestUrl) || /\/releases\/\d+\/assets(?:\?|$)/.test(requestUrl));
+
+  return (
+    errorStatus === 404 &&
+    (isReleaseAssetRequest ||
+      (typeof errorMessage === 'string' && errorMessage.includes('update-a-release-asset')))
+  );
+};
+
+const isImmutableReleaseAssetUploadFailure = (error: any): boolean => {
+  const errorStatus = error?.status ?? error?.response?.status;
+  const errorMessage = error?.response?.data?.message ?? error?.message;
+
+  return errorStatus === 422 && /immutable release/i.test(String(errorMessage));
+};
+
+const immutableReleaseAssetUploadMessage = (
+  name: string,
+  prerelease: boolean | undefined,
+): string =>
+  prerelease
+    ? `Cannot upload asset ${name} to an immutable release. GitHub only allows asset uploads before a release is published, but draft prereleases publish with the release.published event instead of release.prereleased. If you need prereleases with assets on an immutable-release repository, keep the release as a draft with draft: true, then publish it later from that draft and subscribe downstream workflows to release.published.`
+    : `Cannot upload asset ${name} to an immutable release. GitHub only allows asset uploads before a release is published, so upload assets to a draft release before you publish it.`;
+
 export const upload = async (
   config: Config,
   releaser: Releaser,
@@ -297,11 +310,9 @@ export const upload = async (
   const releaseIdMatch = url.match(/\/releases\/(\d+)\/assets/);
   const releaseId = releaseIdMatch ? Number(releaseIdMatch[1]) : undefined;
   const currentAsset = currentAssets.find(
-    // note: GitHub renames asset filenames that have special characters, non-alphanumeric characters, and leading or trailing periods. The "List release assets" endpoint lists the renamed filenames.
-    // due to this renaming we need to be mindful when we compare the file name we're uploading with a name github may already have rewritten for logical comparison
-    // see https://docs.github.com/en/rest/releases/assets?apiVersion=2022-11-28#upload-a-release-asset
-    ({ name: currentName, label: currentLabel }) =>
-      currentName === name || currentName === alignAssetName(name) || currentLabel === name,
+    // GitHub can rewrite uploaded asset names, so compare against both the raw name
+    // GitHub returns and the restored label we set when available.
+    (currentAsset) => releaseAssetMatchesName(name, currentAsset),
   );
   if (currentAsset) {
     if (config.input_overwrite_files === false) {
@@ -319,6 +330,32 @@ export const upload = async (
   console.log(`⬆️ Uploading ${name}...`);
   const endpoint = new URL(url);
   endpoint.searchParams.append('name', name);
+  const findReleaseAsset = async (
+    matches: (asset: { id: number; name: string; label?: string | null }) => boolean,
+    attempts: number = 3,
+  ) => {
+    if (releaseId === undefined) {
+      return undefined;
+    }
+
+    for (let attempt = 1; attempt <= attempts; attempt++) {
+      const latestAssets = await releaser.listReleaseAssets({
+        owner,
+        repo,
+        release_id: releaseId,
+      });
+      const latestAsset = latestAssets.find(matches);
+      if (latestAsset) {
+        return latestAsset;
+      }
+
+      if (attempt < attempts) {
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+    }
+
+    return undefined;
+  };
   const uploadAsset = async () => {
     const fh = await open(path);
     try {
@@ -334,8 +371,54 @@ export const upload = async (
     }
   };
 
-  try {
-    const resp = await uploadAsset();
+  const maybeRestoreAssetLabel = async (uploadedAsset: {
+    id?: number;
+    name?: string;
+    label?: string | null;
+    [key: string]: any;
+  }) => {
+    if (!uploadedAsset.name || uploadedAsset.name === name || !uploadedAsset.id) {
+      return uploadedAsset;
+    }
+
+    console.log(`✏️ Restoring asset label to ${name}...`);
+
+    const updateAssetLabel = async (assetId: number) => {
+      const { data } = await releaser.updateReleaseAsset({
+        owner,
+        repo,
+        asset_id: assetId,
+        name: uploadedAsset.name!,
+        label: name,
+      });
+      return data;
+    };
+
+    try {
+      return await updateAssetLabel(uploadedAsset.id);
+    } catch (error: any) {
+      const errorStatus = error?.status ?? error?.response?.status;
+
+      if (errorStatus === 404 && releaseId !== undefined) {
+        try {
+          const latestAsset = await findReleaseAsset(
+            (currentAsset) =>
+              currentAsset.id === uploadedAsset.id || currentAsset.name === uploadedAsset.name,
+          );
+          if (latestAsset) {
+            return await updateAssetLabel(latestAsset.id);
+          }
+        } catch (refreshError) {
+          console.warn(`error refreshing release assets for ${name}: ${refreshError}`);
+        }
+      }
+
+      console.warn(`error updating release asset label for ${name}: ${error}`);
+      return uploadedAsset;
+    }
+  };
+
+  const handleUploadedAsset = async (resp: { status: number; data: any }) => {
     const json = resp.data;
     if (resp.status !== 201) {
       throw new Error(
@@ -344,27 +427,38 @@ export const upload = async (
         }\n${json.message}\n${JSON.stringify(json.errors)}`,
       );
     }
-    if (json.name && json.name !== name && json.id) {
-      console.log(`✏️ Restoring asset label to ${name}...`);
-      try {
-        const { data } = await releaser.updateReleaseAsset({
-          owner,
-          repo,
-          asset_id: json.id,
-          name: json.name,
-          label: name,
-        });
-        console.log(`✅ Uploaded ${name}`);
-        return data;
-      } catch (error) {
-        console.warn(`error updating release asset label for ${name}: ${error}`);
-      }
-    }
+    const assetWithLabel = await maybeRestoreAssetLabel(json);
     console.log(`✅ Uploaded ${name}`);
-    return json;
+    return assetWithLabel;
+  };
+
+  try {
+    return await handleUploadedAsset(await uploadAsset());
   } catch (error: any) {
     const errorStatus = error?.status ?? error?.response?.status;
     const errorData = error?.response?.data;
+
+    if (isImmutableReleaseAssetUploadFailure(error)) {
+      throw new Error(immutableReleaseAssetUploadMessage(name, config.input_prerelease));
+    }
+
+    if (releaseId !== undefined && isReleaseAssetUpdateNotFound(error)) {
+      try {
+        const latestAsset = await findReleaseAsset((currentAsset) =>
+          releaseAssetMatchesName(name, currentAsset),
+        );
+        if (latestAsset) {
+          console.warn(
+            `error updating release asset metadata for ${name}: ${error}. Matching asset is present after refresh; continuing...`,
+          );
+          return latestAsset;
+        }
+      } catch (refreshError) {
+        console.warn(
+          `error refreshing release assets after metadata update failure: ${refreshError}`,
+        );
+      }
+    }
 
     // Handle race conditions across concurrent workflows uploading the same asset.
     if (
@@ -381,8 +475,8 @@ export const upload = async (
         repo,
         release_id: releaseId,
       });
-      const latestAsset = latestAssets.find(
-        ({ name: currentName }) => currentName == alignAssetName(name),
+      const latestAsset = latestAssets.find((currentAsset) =>
+        releaseAssetMatchesName(name, currentAsset),
       );
       if (latestAsset) {
         await releaser.deleteReleaseAsset({
@@ -390,17 +484,7 @@ export const upload = async (
           repo,
           asset_id: latestAsset.id,
         });
-        const retryResp = await uploadAsset();
-        const retryJson = retryResp.data;
-        if (retryResp.status !== 201) {
-          throw new Error(
-            `Failed to upload release asset ${name}. received status code ${
-              retryResp.status
-            }\n${retryJson.message}\n${JSON.stringify(retryJson.errors)}`,
-          );
-        }
-        console.log(`✅ Uploaded ${name}`);
-        return retryJson;
+        return await handleUploadedAsset(await uploadAsset());
       }
     }
 
@@ -425,6 +509,11 @@ export const release = async (
 
   const discussion_category_name = config.input_discussion_category_name;
   const generate_release_notes = config.input_generate_release_notes;
+  const previous_tag_name = config.input_previous_tag;
+
+  if (generate_release_notes && previous_tag_name) {
+    console.log(`📝 Generating release notes using previous tag ${previous_tag_name}`);
+  }
   try {
     const _release: Release | undefined = await findTagFromReleases(releaser, owner, repo, tag);
 
@@ -438,6 +527,7 @@ export const release = async (
         discussion_category_name,
         generate_release_notes,
         maxRetries,
+        previous_tag_name,
       );
     }
 
@@ -491,6 +581,7 @@ export const release = async (
       discussion_category_name,
       generate_release_notes,
       make_latest,
+      previous_tag_name,
     });
     return {
       release: release.data,
@@ -513,6 +604,7 @@ export const release = async (
       discussion_category_name,
       generate_release_notes,
       maxRetries,
+      previous_tag_name,
     );
   }
 };
@@ -796,6 +888,7 @@ async function createRelease(
   discussion_category_name: string | undefined,
   generate_release_notes: boolean | undefined,
   maxRetries: number,
+  previous_tag_name: string | undefined,
 ): Promise<ReleaseResult> {
   const tag_name = tag;
   const name = config.input_name || tag;
@@ -822,6 +915,7 @@ async function createRelease(
       discussion_category_name,
       generate_release_notes,
       make_latest,
+      previous_tag_name,
     });
     const canonicalRelease = await canonicalizeCreatedRelease(
       releaser,

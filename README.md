@@ -131,6 +131,20 @@ jobs:
 
 > **⚠️ Note for Windows:** Both `\` and `/` path separators are accepted in `files` globs. If you need to match a literal glob metacharacter such as `[` or `]`, keep escaping the metacharacter itself in the pattern.
 
+If your release assets are generated under a subdirectory, set `working_directory`
+and keep the `files` patterns relative to that directory.
+
+```yaml
+- name: Release
+  uses: softprops/action-gh-release@v2
+  if: github.ref_type == 'tag'
+  with:
+    working_directory: dist
+    files: |
+      Release.txt
+      checksums/*.txt
+```
+
 ### 📝 External release notes
 
 Many systems exist that can help generate release notes for you. This action supports
@@ -163,6 +177,20 @@ jobs:
           token: ${{ secrets.CUSTOM_GITHUB_TOKEN }}
 ```
 
+When you use GitHub's built-in `generate_release_notes` support, you can optionally
+pin the comparison base explicitly with `previous_tag`. This is useful when the default
+comparison range does not match the release series you want to publish.
+
+```yaml
+- name: Release
+  uses: softprops/action-gh-release@v2
+  with:
+    tag_name: stage-2026-03-15
+    target_commitish: ${{ github.sha }}
+    previous_tag: prod-2026-03-01
+    generate_release_notes: true
+```
+
 ### 💅 Customizing
 
 #### inputs
@@ -173,10 +201,11 @@ The following are optional as `step.with` keys
 | -------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `body`                     | String  | Text communicating notable changes in this release                                                                                                                                                                                                                                                                                                                                                                                              |
 | `body_path`                | String  | Path to load text communicating notable changes in this release                                                                                                                                                                                                                                                                                                                                                                                 |
-| `draft`                    | Boolean | Indicator of whether or not this release is a draft                                                                                                                                                                                                                                                                                                                                                                                             |
+| `draft`                    | Boolean | Keep the release as a draft. Defaults to false. When reusing an existing draft release, set this to true to keep it draft; omit it to publish after upload.                                                                                                                                                                                                                                                                                 |
 | `prerelease`               | Boolean | Indicator of whether or not is a prerelease                                                                                                                                                                                                                                                                                                                                                                                                     |
 | `preserve_order`           | Boolean | Upload assets sequentially in the provided order. This controls the action's upload behavior, but it does not control the final asset ordering that GitHub may display on the release page or return from the Releases API.                                                                                                                                                                                                                 |
 | `files`                    | String  | Newline-delimited globs of paths to assets to upload for release. Escape glob metacharacters when you need to match a literal filename that contains them, such as `[` or `]`. `~/...` expands to the runner home directory. On Windows, both `\` and `/` separators are accepted. GitHub may normalize raw asset filenames that contain special characters; the action restores the asset label when possible, but the final download name remains GitHub-controlled. |
+| `working_directory`        | String  | Base directory to resolve `files` globs against. Use this when release assets live under a subdirectory. If omitted, the action resolves `files` from `${{ github.workspace }}`.                                                                                                                                                                                                                                                          |
 | `overwrite_files`          | Boolean | Indicator of whether files should be overwritten when they already exist. Defaults to true                                                                                                                                                                                                                                                                                                                                                      |
 | `name`                     | String  | Name of the release. defaults to tag name                                                                                                                                                                                                                                                                                                                                                                                                       |
 | `tag_name`                 | String  | Name of a tag. defaults to `github.ref_name`. `refs/tags/<name>` values are normalized to `<name>`.                                                                                                                                                                                                                                                                                                                                                |
@@ -186,15 +215,26 @@ The following are optional as `step.with` keys
 | `token`                    | String  | Authorized GitHub token or PAT. Defaults to `${{ github.token }}` when omitted. A non-empty explicit token overrides `GITHUB_TOKEN`. Passing `""` treats the token as explicitly unset, so omit the input entirely or use an expression such as `${{ inputs.token || github.token }}` when wrapping this action in a composite action.                                                                                                                                                  |
 | `discussion_category_name` | String  | If specified, a discussion of the specified category is created and linked to the release. The value must be a category that already exists in the repository. For more information, see ["Managing categories for discussions in your repository."](https://docs.github.com/en/discussions/managing-discussions-for-your-community/managing-categories-for-discussions-in-your-repository)                                                     |
 | `generate_release_notes`   | Boolean | Whether to automatically generate the name and body for this release. If name is specified, the specified name will be used; otherwise, a name will be automatically generated. If body is specified, the body will be pre-pended to the automatically generated notes. See the [GitHub docs for this feature](https://docs.github.com/en/repositories/releasing-projects-on-github/automatically-generated-release-notes) for more information |
+| `previous_tag`             | String  | Optional. When `generate_release_notes` is enabled, use this tag as GitHub's `previous_tag_name` comparison base. If omitted, GitHub chooses the comparison base automatically.                                                                                                                                                                                                               |
 | `append_body`              | Boolean | Append to existing body instead of overwriting it                                                                                                                                                                                                                                                                                                                                                                                               |
 | `make_latest`              | String  | Specifies whether this release should be set as the latest release for the repository. Drafts and prereleases cannot be set as latest. Can be `true`, `false`, or `legacy`. Uses GitHub api defaults if not provided                                                                                                                                                                                                                            |
 
 💡 When providing a `body` and `body_path` at the same time, `body_path` will be
 attempted first, then falling back on `body` if the path can not be read from.
 
-💡 When the release info keys (such as `name`, `body`, `draft`, `prerelease`, etc.)
-are not explicitly set and there is already an existing release for the tag, the
-release will retain its original info.
+💡 When the release info keys (such as `name`, `body`, `prerelease`, etc.) are not
+explicitly set and there is already an existing release for the tag, the release
+will retain its original info.
+
+💡 Draft status is handled separately during finalization. If the action reuses an
+existing draft release, set `draft: true` to keep it draft; if `draft` is omitted,
+the action will publish that draft after uploading assets.
+
+💡 GitHub immutable releases lock assets after publication. Standard releases in this
+action already upload assets before publishing, but prereleases stay published by
+default so `release.prereleased` workflows keep firing. On an immutable-release
+repository, use `draft: true` for prereleases that upload assets, then publish that
+draft later and subscribe downstream workflows to `release.published`.
 
 💡 `files` is glob-based, so literal filenames that contain glob metacharacters such as
 `[` or `]` must be escaped in the pattern.
