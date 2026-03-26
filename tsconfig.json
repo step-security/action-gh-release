@@ -3,7 +3,7 @@
     "useUnknownInCatchVariables": false,
     /* Basic Options */
     // "incremental": true,                   /* Enable incremental compilation */
-    "target": "es2022",
+    "target": "ES2024",
     "module": "NodeNext",
     // "allowJs": true,                       /* Allow javascript files to be compiled. */
     // "checkJs": true,                       /* Report errors in .js files. */
