@@ -138,7 +138,7 @@ and keep the `files` patterns relative to that directory.
 
 ```yaml
 - name: Release
-  uses: softprops/action-gh-release@v2
+  uses: step-security/action-gh-release@v2
   if: github.ref_type == 'tag'
   with:
     working_directory: dist
@@ -185,7 +185,7 @@ comparison range does not match the release series you want to publish.
 
 ```yaml
 - name: Release
-  uses: softprops/action-gh-release@v2
+  uses: step-security/action-gh-release@v2
   with:
     tag_name: stage-2026-03-15
     target_commitish: ${{ github.sha }}
