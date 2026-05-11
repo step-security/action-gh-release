@@ -1,6 +1,6 @@
 {
   "name": "action-gh-release",
-  "version": "2.6.2",
+  "version": "3.0.0",
   "private": true,
   "description": "GitHub Action for creating GitHub Releases",
   "main": "lib/main.js",
@@ -10,8 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest --coverage",
     "fmt": "prettier --write \"src/**/*.ts\" \"__tests__/**/*.ts\"",
-    "fmtcheck": "prettier --check \"src/**/*.ts\" \"__tests__/**/*.ts\"",
-    "updatetag": "git tag -d v2 && git push origin :v2 && git tag -a v2 -m '' && git push origin v2"
+    "fmtcheck": "prettier --check \"src/**/*.ts\" \"__tests__/**/*.ts\""
   },
   "repository": {
     "type": "git",
@@ -21,6 +20,9 @@
     "actions"
   ],
   "author": "step-security",
+  "engines": {
+    "node": ">=24"
+  },
   "dependencies": {
     "@actions/core": "^3.0.0",
     "@actions/github": "^9.0.0",
@@ -32,13 +34,13 @@
   "devDependencies": {
     "@types/glob": "^9.0.0",
     "@types/mime-types": "^3.0.1",
-    "@types/node": "^20.19.37",
-    "@vitest/coverage-v8": "^4.1.0",
-    "axios": "^1.8.3",
-    "esbuild": "^0.27.3",
-    "prettier": "3.8.1",
+    "@types/node": "^24",
+    "@vitest/coverage-v8": "^4.1.4",
+    "axios": "^1.16.0",
+    "esbuild": "^0.28.0",
+    "prettier": "3.8.2",
     "ts-node": "^10.9.2",
-    "typescript": "^5.9.3",
+    "typescript": "^6.0.2",
     "typescript-formatter": "^7.2.2",
     "vitest": "^4.0.4"
   }
