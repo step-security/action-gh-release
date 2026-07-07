@@ -1,6 +1,6 @@
 {
   "name": "action-gh-release",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "private": true,
   "description": "GitHub Action for creating GitHub Releases",
   "main": "lib/main.js",
@@ -24,8 +24,8 @@
     "node": ">=24"
   },
   "dependencies": {
-    "@actions/core": "^3.0.0",
-    "@actions/github": "^9.0.0",
+    "@actions/core": "^3.0.1",
+    "@actions/github": "^9.1.1",
     "@octokit/plugin-retry": "^8.1.0",
     "@octokit/plugin-throttling": "^11.0.3",
     "glob": "^13.0.6",
@@ -35,12 +35,12 @@
     "@types/glob": "^9.0.0",
     "@types/mime-types": "^3.0.1",
     "@types/node": "^24",
-    "@vitest/coverage-v8": "^4.1.4",
-    "axios": "^1.16.0",
-    "esbuild": "^0.28.0",
-    "prettier": "3.8.2",
+    "@vitest/coverage-v8": "^4.1.8",
+    "axios": "^1.18.0",
+    "esbuild": "^0.28.1",
+    "prettier": "3.8.3",
     "ts-node": "^10.9.2",
-    "typescript": "^6.0.2",
+    "typescript": "^6.0.3",
     "typescript-formatter": "^7.2.2",
     "vitest": "^4.0.4"
   }
