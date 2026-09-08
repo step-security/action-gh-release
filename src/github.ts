@@ -1,11 +1,62 @@
 import { GitHub } from '@actions/github/lib/utils';
 import { statSync } from 'fs';
-import { open } from 'fs/promises';
+import { open, type FileHandle } from 'fs/promises';
 import { lookup } from 'mime-types';
 import { basename } from 'path';
-import { alignAssetName, Config, isTag, normalizeTagName, releaseBody } from './util';
+import { alignAssetName, Config, errorMessage, isTag, normalizeTagName, releaseBody } from './util';
 
 type GitHub = InstanceType<typeof GitHub>;
+
+type UploadChunk = ArrayBuffer | Uint8Array<ArrayBufferLike>;
+type UploadBody = ReadableStream<Uint8Array<ArrayBufferLike>>;
+type UnknownRecord = Record<string, unknown>;
+
+const asRecord = (value: unknown): UnknownRecord | undefined =>
+  typeof value === 'object' && value !== null ? (value as UnknownRecord) : undefined;
+
+const getErrorStatus = (error: unknown): number | undefined => {
+  const errorRecord = asRecord(error);
+  if (typeof errorRecord?.status === 'number') {
+    return errorRecord.status;
+  }
+
+  const response = asRecord(errorRecord?.response);
+  return typeof response?.status === 'number' ? response.status : undefined;
+};
+
+const getResponseData = (error: unknown): UnknownRecord | undefined => {
+  const response = asRecord(asRecord(error)?.response);
+  return asRecord(response?.data);
+};
+
+const getErrorMessage = (error: unknown): string | undefined => {
+  const message = asRecord(error)?.message;
+  return typeof message === 'string' ? message : undefined;
+};
+
+const getRequestUrl = (error: unknown): string | undefined => {
+  const request = asRecord(asRecord(error)?.request);
+  return typeof request?.url === 'string' ? request.url : undefined;
+};
+
+const getValidationErrors = (error: unknown): unknown[] => {
+  const errors = getResponseData(error)?.errors;
+  return Array.isArray(errors) ? errors : [];
+};
+
+const hasValidationErrorCode = (error: unknown, code: string): boolean =>
+  asRecord(getValidationErrors(error)[0])?.code === code;
+
+const fileUploadStream = (fileHandle: FileHandle): UploadBody => {
+  const source = fileHandle.readableWebStream() as ReadableStream<UploadChunk>;
+  return source.pipeThrough(
+    new TransformStream<UploadChunk, Uint8Array<ArrayBufferLike>>({
+      transform(chunk, controller) {
+        controller.enqueue(chunk instanceof Uint8Array ? chunk : new Uint8Array(chunk));
+      },
+    }),
+  );
+};
 
 export interface ReleaseAsset {
   name: string;
@@ -54,6 +105,43 @@ type ReleaseMutationParams = {
   previous_tag_name?: string;
 };
 
+class ReleaseCreationError extends Error {
+  readonly status = 404;
+
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = 'ReleaseCreationError';
+  }
+}
+
+class ReleaseAccessError extends Error {
+  readonly status = 404;
+
+  constructor(message: string, cause: unknown) {
+    super(message, { cause });
+    this.name = 'ReleaseAccessError';
+  }
+}
+
+const repositoryAccessGuidance = (owner: string, repo: string): string =>
+  `Verify that ${owner}/${repo} exists under the expected owner, the token can access it, the repository is selected when using a fine-grained PAT, and the token has Contents: write permission.`;
+
+const releaseCreation404Message = (
+  owner: string,
+  repo: string,
+  discussionCategory: string | undefined,
+  error: unknown,
+): string => {
+  const discussionGuidance = discussionCategory
+    ? ` Also verify that Discussions and the requested category "${discussionCategory}" are enabled.`
+    : '';
+
+  return `GitHub returned 404 while creating the release. ${repositoryAccessGuidance(owner, repo)}${discussionGuidance} GitHub response: ${errorMessage(error)}`;
+};
+
+const releaseLookup404Message = (owner: string, repo: string, error: unknown): string =>
+  `GitHub returned 404 while checking existing releases. ${repositoryAccessGuidance(owner, repo)} GitHub response: ${errorMessage(error)}`;
+
 export interface Releaser {
   getReleaseByTag(params: { owner: string; repo: string; tag: string }): Promise<{ data: Release }>;
 
@@ -82,7 +170,12 @@ export interface Releaser {
     release_id: number;
   }): Promise<Array<{ id: number; name: string; label?: string | null; [key: string]: any }>>;
 
-  deleteReleaseAsset(params: { owner: string; repo: string; asset_id: number }): Promise<void>;
+  deleteReleaseAsset(params: {
+    owner: string;
+    repo: string;
+    release_id: number;
+    asset_id: number;
+  }): Promise<void>;
 
   deleteRelease(params: { owner: string; repo: string; release_id: number }): Promise<void>;
 
@@ -99,7 +192,7 @@ export interface Releaser {
     size: number;
     mime: string;
     token: string;
-    data: any;
+    data: UploadBody;
   }): Promise<{ status: number; data: any }>;
 }
 
@@ -215,9 +308,31 @@ export class GitHubReleaser implements Releaser {
   async deleteReleaseAsset(params: {
     owner: string;
     repo: string;
+    release_id: number;
     asset_id: number;
   }): Promise<void> {
-    await this.github.rest.repos.deleteReleaseAsset(params);
+    const { release_id, ...githubParams } = params;
+    try {
+      await this.github.rest.repos.deleteReleaseAsset(githubParams);
+    } catch (error: unknown) {
+      if (getErrorStatus(error) !== 404) {
+        throw error;
+      }
+
+      try {
+        await this.github.request(
+          'DELETE /repos/{owner}/{repo}/releases/{release_id}/assets/{asset_id}',
+          params,
+        );
+      } catch (fallbackError: unknown) {
+        throw new AggregateError(
+          [error, fallbackError],
+          `Failed to delete release asset ${params.asset_id}. GitHub endpoint: ${errorMessage(
+            error,
+          )}; release-scoped endpoint: ${errorMessage(fallbackError)}`,
+        );
+      }
+    }
   }
 
   async deleteRelease(params: { owner: string; repo: string; release_id: number }): Promise<void> {
@@ -239,7 +354,7 @@ export class GitHubReleaser implements Releaser {
     size: number;
     mime: string;
     token: string;
-    data: any;
+    data: UploadBody;
   }): Promise<{ status: number; data: any }> {
     return this.github.request({
       method: 'POST',
@@ -271,10 +386,10 @@ const releaseAssetMatchesName = (
   asset: { name: string; label?: string | null },
 ): boolean => asset.name === name || asset.name === alignAssetName(name) || asset.label === name;
 
-const isReleaseAssetUpdateNotFound = (error: any): boolean => {
-  const errorStatus = error?.status ?? error?.response?.status;
-  const requestUrl = error?.request?.url;
-  const errorMessage = error?.message;
+const isReleaseAssetUpdateNotFound = (error: unknown): boolean => {
+  const errorStatus = getErrorStatus(error);
+  const requestUrl = getRequestUrl(error);
+  const message = getErrorMessage(error);
   const isReleaseAssetRequest =
     typeof requestUrl === 'string' &&
     (/\/releases\/assets\//.test(requestUrl) || /\/releases\/\d+\/assets(?:\?|$)/.test(requestUrl));
@@ -282,15 +397,15 @@ const isReleaseAssetUpdateNotFound = (error: any): boolean => {
   return (
     errorStatus === 404 &&
     (isReleaseAssetRequest ||
-      (typeof errorMessage === 'string' && errorMessage.includes('update-a-release-asset')))
+      (typeof message === 'string' && message.includes('update-a-release-asset')))
   );
 };
 
-const isImmutableReleaseAssetUploadFailure = (error: any): boolean => {
-  const errorStatus = error?.status ?? error?.response?.status;
-  const errorMessage = error?.response?.data?.message ?? error?.message;
+const isImmutableReleaseAssetUploadFailure = (error: unknown): boolean => {
+  const errorStatus = getErrorStatus(error);
+  const message = getResponseData(error)?.message ?? getErrorMessage(error);
 
-  return errorStatus === 422 && /immutable release/i.test(String(errorMessage));
+  return errorStatus === 422 && /immutable release/i.test(String(message));
 };
 
 const immutableReleaseAssetUploadMessage = (
@@ -307,11 +422,10 @@ export const upload = async (
   url: string,
   path: string,
   currentAssets: Array<{ id: number; name: string; label?: string | null }>,
+  releaseId: number,
 ): Promise<any> => {
   const [owner, repo] = config.github_repository.split('/');
   const { name, mime, size } = asset(path);
-  const releaseIdMatch = url.match(/\/releases\/(\d+)\/assets/);
-  const releaseId = releaseIdMatch ? Number(releaseIdMatch[1]) : undefined;
   const currentAsset = currentAssets.find(
     // GitHub can rewrite uploaded asset names, so compare against both the raw name
     // GitHub returns and the restored label we set when available.
@@ -327,6 +441,7 @@ export const upload = async (
         asset_id: currentAsset.id || 1,
         owner,
         repo,
+        release_id: releaseId,
       });
     }
   }
@@ -367,7 +482,7 @@ export const upload = async (
         size,
         mime,
         token: config.github_token,
-        data: fh.readableWebStream(),
+        data: fileUploadStream(fh),
       });
     } finally {
       await fh.close();
@@ -399,8 +514,8 @@ export const upload = async (
 
     try {
       return await updateAssetLabel(uploadedAsset.id);
-    } catch (error: any) {
-      const errorStatus = error?.status ?? error?.response?.status;
+    } catch (error: unknown) {
+      const errorStatus = getErrorStatus(error);
 
       if (errorStatus === 404 && releaseId !== undefined) {
         try {
@@ -437,9 +552,8 @@ export const upload = async (
 
   try {
     return await handleUploadedAsset(await uploadAsset());
-  } catch (error: any) {
-    const errorStatus = error?.status ?? error?.response?.status;
-    const errorData = error?.response?.data;
+  } catch (error: unknown) {
+    const errorStatus = getErrorStatus(error);
 
     if (isImmutableReleaseAssetUploadFailure(error)) {
       throw new Error(immutableReleaseAssetUploadMessage(name, config.input_prerelease));
@@ -467,7 +581,7 @@ export const upload = async (
     if (
       config.input_overwrite_files !== false &&
       errorStatus === 422 &&
-      errorData?.errors?.[0]?.code === 'already_exists' &&
+      hasValidationErrorCode(error, 'already_exists') &&
       releaseId !== undefined
     ) {
       console.log(
@@ -485,6 +599,7 @@ export const upload = async (
         await releaser.deleteReleaseAsset({
           owner,
           repo,
+          release_id: releaseId,
           asset_id: latestAsset.id,
         });
         return await handleUploadedAsset(await uploadAsset());
@@ -517,23 +632,36 @@ export const release = async (
   if (generate_release_notes && previous_tag_name) {
     console.log(`📝 Generating release notes using previous tag ${previous_tag_name}`);
   }
+  let _release: Release | undefined;
   try {
-    const _release: Release | undefined = await findTagFromReleases(releaser, owner, repo, tag);
-
-    if (_release === undefined) {
-      return await createRelease(
-        tag,
-        config,
-        releaser,
-        owner,
-        repo,
-        discussion_category_name,
-        generate_release_notes,
-        maxRetries,
-        previous_tag_name,
-      );
+    _release = await findTagFromReleases(releaser, owner, repo, tag, maxRetries);
+  } catch (error) {
+    if (getErrorStatus(error) === 404) {
+      const diagnostic = releaseLookup404Message(owner, repo, error);
+      console.log(`⚠️ ${diagnostic}`);
+      throw new ReleaseAccessError(diagnostic, error);
     }
+    console.log(
+      `⚠️ Unexpected error fetching GitHub release for tag ${config.github_ref}: ${error}`,
+    );
+    throw error;
+  }
 
+  if (_release === undefined) {
+    return await createRelease(
+      tag,
+      config,
+      releaser,
+      owner,
+      repo,
+      discussion_category_name,
+      generate_release_notes,
+      maxRetries,
+      previous_tag_name,
+    );
+  }
+
+  try {
     let existingRelease: Release = _release!;
     console.log(`Found release ${existingRelease.name} (with id=${existingRelease.id})`);
 
@@ -591,7 +719,10 @@ export const release = async (
       created: false,
     };
   } catch (error) {
-    if (error.status !== 404) {
+    if (error instanceof ReleaseCreationError) {
+      throw error;
+    }
+    if (getErrorStatus(error) !== 404) {
       console.log(
         `⚠️ Unexpected error fetching GitHub release for tag ${config.github_ref}: ${error}`,
       );
@@ -719,14 +850,16 @@ export const listReleaseAssets = async (
 /**
  * Finds a release by tag name.
  *
- * Uses the direct getReleaseByTag API for O(1) lookup instead of iterating
- * through all releases. This also avoids GitHub's API pagination limit of
- * 10000 results which would cause failures for repositories with many releases.
+ * Uses the direct getReleaseByTag API for O(1) lookup. Because GitHub does not
+ * expose draft releases through that endpoint, a 404 falls back to a bounded
+ * scan of recent releases and briefly retries in case the listing is not yet
+ * consistent.
  *
  * @param releaser - The GitHub API wrapper for release operations
  * @param owner - The owner of the repository
  * @param repo - The name of the repository
  * @param tag - The tag name to search for
+ * @param listingAttempts - The maximum number of listing attempts after a direct 404
  * @returns The release with the given tag name, or undefined if no release with that tag name is found
  */
 export async function findTagFromReleases(
@@ -734,18 +867,35 @@ export async function findTagFromReleases(
   owner: string,
   repo: string,
   tag: string,
+  listingAttempts: number = 1,
 ): Promise<Release | undefined> {
   try {
     const { data: release } = await releaser.getReleaseByTag({ owner, repo, tag });
     return release;
   } catch (error) {
-    // Release not found (404) or other error - return undefined to allow creation
-    if (error.status === 404) {
-      return undefined;
+    if (getErrorStatus(error) !== 404) {
+      throw error;
     }
-    // Re-throw unexpected errors
-    throw error;
   }
+
+  if (listingAttempts <= 0) {
+    return undefined;
+  }
+
+  const attempts = Math.max(1, listingAttempts);
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
+    const recentReleases = await recentReleasesByTag(releaser, owner, repo, tag);
+    const canonicalRelease = pickCanonicalRelease(recentReleases, undefined);
+    if (canonicalRelease) {
+      return canonicalRelease;
+    }
+
+    if (attempt < attempts - 1) {
+      await sleep(CREATED_RELEASE_DISCOVERY_RETRY_DELAY_MS);
+    }
+  }
+
+  return undefined;
 }
 
 const CREATED_RELEASE_DISCOVERY_RETRY_DELAY_MS = 1000;
@@ -797,33 +947,31 @@ function pickCanonicalRelease(
   })[0];
 }
 
-async function cleanupDuplicateDraftReleases(
+async function cleanupCreatedDuplicateDraftRelease(
   releaser: Releaser,
   owner: string,
   repo: string,
   tag: string,
   canonicalReleaseId: number,
-  releases: Release[],
+  createdRelease: Release,
 ): Promise<void> {
-  const uniqueReleases = Array.from(
-    new Map(releases.map((release) => [release.id, release])).values(),
-  );
+  if (
+    createdRelease.id === canonicalReleaseId ||
+    !createdRelease.draft ||
+    createdRelease.assets.length > 0
+  ) {
+    return;
+  }
 
-  for (const duplicate of uniqueReleases) {
-    if (duplicate.id === canonicalReleaseId || !duplicate.draft || duplicate.assets.length > 0) {
-      continue;
-    }
-
-    try {
-      console.log(`🧹 Removing duplicate draft release ${duplicate.id} for tag ${tag}...`);
-      await releaser.deleteRelease({
-        owner,
-        repo,
-        release_id: duplicate.id,
-      });
-    } catch (error) {
-      console.warn(`error deleting duplicate release ${duplicate.id}: ${error}`);
-    }
+  try {
+    console.log(`🧹 Removing duplicate draft release ${createdRelease.id} for tag ${tag}...`);
+    await releaser.deleteRelease({
+      owner,
+      repo,
+      release_id: createdRelease.id,
+    });
+  } catch (error) {
+    console.warn(`error deleting duplicate release ${createdRelease.id}: ${error}`);
   }
 }
 
@@ -840,7 +988,7 @@ async function canonicalizeCreatedRelease(
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     let releaseByTag: Release | undefined;
     try {
-      releaseByTag = await findTagFromReleases(releaser, owner, repo, tag);
+      releaseByTag = await findTagFromReleases(releaser, owner, repo, tag, 0);
     } catch (error) {
       console.warn(`error reloading release for tag ${tag}: ${error}`);
     }
@@ -860,10 +1008,19 @@ async function canonicalizeCreatedRelease(
         );
       }
 
-      await cleanupDuplicateDraftReleases(releaser, owner, repo, tag, canonicalRelease.id, [
-        createdRelease,
-        ...recentReleases,
-      ]);
+      const refreshedCreatedRelease = recentReleases.find(
+        (release) => release.id === createdRelease.id,
+      );
+      if (refreshedCreatedRelease) {
+        await cleanupCreatedDuplicateDraftRelease(
+          releaser,
+          owner,
+          repo,
+          tag,
+          canonicalRelease.id,
+          refreshedCreatedRelease,
+        );
+      }
       return canonicalRelease;
     }
 
@@ -933,12 +1090,13 @@ async function createRelease(
       release: canonicalRelease,
       created: canonicalRelease.id === createdRelease.data.id,
     };
-  } catch (error) {
+  } catch (error: unknown) {
+    const errorStatus = getErrorStatus(error);
     // presume a race with competing matrix runs
-    console.log(`⚠️ GitHub release failed with status: ${error.status}`);
-    console.log(`${JSON.stringify(error.response.data)}`);
+    console.log(`⚠️ GitHub release failed with status: ${errorStatus}`);
+    console.log(errorMessage(error));
 
-    switch (error.status) {
+    switch (errorStatus) {
       case 403:
         console.log(
           'Skip retry — your GitHub token/PAT does not have the required permission to create a release',
@@ -946,13 +1104,13 @@ async function createRelease(
         throw error;
 
       case 404:
-        console.log('Skip retry - discussion category mismatch');
-        throw error;
+        const diagnostic = releaseCreation404Message(owner, repo, discussion_category_name, error);
+        console.log(`Skip retry — ${diagnostic}`);
+        throw new ReleaseCreationError(diagnostic, error);
 
       case 422:
         // Check if this is a race condition with "already_exists" error
-        const errorData = error.response?.data;
-        if (errorData?.errors?.[0]?.code === 'already_exists') {
+        if (hasValidationErrorCode(error, 'already_exists')) {
           console.log(
             '⚠️ Release already exists (race condition detected), retrying to find and update existing release...',
           );
@@ -969,16 +1127,17 @@ async function createRelease(
   }
 }
 
-function isTagCreationBlockedError(error: any): boolean {
-  const errors = error?.response?.data?.errors;
-  if (!Array.isArray(errors) || error?.status !== 422) {
+function isTagCreationBlockedError(error: unknown): boolean {
+  if (getErrorStatus(error) !== 422) {
     return false;
   }
 
-  return errors.some(
-    ({ field, message }: { field?: string; message?: string }) =>
-      field === 'pre_receive' &&
-      typeof message === 'string' &&
-      message.includes('creations being restricted'),
-  );
+  return getValidationErrors(error).some((validationError) => {
+    const errorRecord = asRecord(validationError);
+    return (
+      errorRecord?.field === 'pre_receive' &&
+      typeof errorRecord.message === 'string' &&
+      errorRecord.message.includes('creations being restricted')
+    );
+  });
 }
